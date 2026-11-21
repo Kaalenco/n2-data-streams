@@ -207,6 +207,30 @@ Negative tests: wrong cert, tampered body, path-traversal `Subject`, oversized o
 
 ## D. Stability and correctness (core library)
 
+### Status (updated after the stability pass)
+
+Done and covered by tests (95 tests in total, all passing on net10; net11 is verified by CI only):
+- D-1 FIFO queue with drop-oldest and an exact bound (`ConcurrentQueue` + lock).
+- D-2 handler exceptions are contained per subscriber and reported through the new `HandlerFailed` event.
+- D-3 ticks never overlap (a slow handler makes the next tick skip), no shared `Random` instance (`Random.Shared`).
+- D-4 the value source is injectable (`DataStream(config, timeProvider, valueSource)`). **The default is still the random demo source**, because the open question below is unanswered.
+- D-5 reliability is clamped to 0..1; D-6 the polling interval is respected (the hard-coded 1000 ms is gone).
+- D-7 `TryNextResult`, and `default(StreamData).Crc` is never null.
+- D-8 lifecycle: `Start` after `Dispose` throws `ObjectDisposedException`, `Stop`/`Dispose` are idempotent, events are cleared on dispose, the timer starts last in the constructor.
+- D-9 decompression limit (16 MB default, `InvalidDataException`), streams disposed.
+- D-10 manager: the stream list is the single source of truth; the config file is deserialized into a DTO (it cannot redirect `Configfile`); validation of names and duplicates; clear errors (`InvalidDataException` with the file name); atomic save (temp file + move) using the same JSON options as load; lock around list access.
+- D-11 `CreateClient(name)` throws a descriptive `KeyNotFoundException`; `TryCreateClient(name | type)` added. `CreateClient(StreamType)` still returns an unconfigured stream when nothing matches (documented), because existing callers rely on it.
+- D-12 `[Flags]`; D-13 real CRC-16/CCITT-FALSE over little-endian bytes, rounding instead of truncating latitude/longitude, `StreamData.VerifyCrc()`; D-14 `Constants.Epoch` is UTC and `static readonly`; D-15 N/S and E/W fixed; D-16 `DefaultMaximumQueueLength` (the old name is `[Obsolete]`), `reliability` parameter name.
+- D-17 the 6-second `Thread.Sleep` test now uses `FakeTimeProvider` (the whole `DataStream` test class runs in about a second); new tests cover each item above.
+
+**Behaviour changes to put in the 2.0.0 release notes:** queue order (oldest first), data points are produced at every polling interval (previously at most one per second), the CRC values differ from 1.x (different algorithm), `IDataStream` gained `TryNextResult` and `HandlerFailed`, `IDataStreamManager.SaveConfig` parameter is `path`, `StreamType` combinations serialize as `"Time, Position"`.
+
+Still open:
+- D-4 decision: should `DataStream` keep a random demo source by default, or require a value source? Only the owner can answer.
+- D-9: `GetBytes<T>`/`Deserialize<T>` are still unconstrained extension methods, and reflection-based JSON is not trim/AOT-safe.
+- D-13: `StreamData` is still a mutable struct (the CRC is computed at construction and verified on demand).
+- D-17: `Thread.Sleep(200)` tests remain in `DataStreamShould`; they could also move to fake time.
+
 ### High
 
 - **D-1. The queue is LIFO and drops the wrong item** (`DataStream`). `ConcurrentStack` is used as the queue. `NextResult()` returns the newest item, so consumers see data in reverse order.

@@ -1,5 +1,4 @@
-﻿using System.Collections.Concurrent;
-using System.Diagnostics;
+using System.Collections.Concurrent;
 
 namespace N2.DataStreams
 {
@@ -7,32 +6,38 @@ namespace N2.DataStreams
 
     public delegate void DataAvailableEventHandler(object sender, StreamDataAvailableEventArgs e);
 
+    /// <summary>
+    /// A timer driven data stream with a bounded FIFO buffer.
+    /// </summary>
+    /// <remarks>
+    /// Data points are produced at the polling interval by a value source. The default source generates
+    /// random demo values; pass your own <c>valueSource</c> for real data. When the queue is full the
+    /// oldest item is dropped. Exceptions thrown by event handlers never escape the timer thread: they are
+    /// reported through <see cref="HandlerFailed"/>.
+    /// </remarks>
     public class DataStream : IDataStream
     {
-        private bool disposedValue;
-        private readonly System.Timers.Timer _timer = new System.Timers.Timer();
-        private readonly Stopwatch _stopwatch = new Stopwatch();
+        private readonly TimeProvider _time;
+        private readonly ITimer _timer;
+        private readonly Func<double> _valueSource;
+        private readonly ConcurrentQueue<StreamData> _stream = new();
+        private readonly object _queueLock = new();
+        private long _lastTick;
+        private int _ticking;
+        private volatile bool _disposed;
 
         public event StreamDataEventHandler? StreamDataHandler;
 
         public event DataAvailableEventHandler? DataAvailableHandler;
 
+        /// <summary>
+        /// Raised when an event handler throws. The exception is contained, so the stream keeps running.
+        /// </summary>
+        public event Action<Exception>? HandlerFailed;
+
         public int PollingInterval { get; private set; }
-        private readonly ConcurrentStack<StreamData> _stream = new ConcurrentStack<StreamData>();
 
         public bool TimeStreamAvailable { get; private set; }
-
-        protected virtual void OnDataAvailable(StreamType streamType, float responsibility)
-        {
-            var eventArgs = new StreamDataAvailableEventArgs(streamType, responsibility);
-            DataAvailableHandler?.Invoke(this, eventArgs);
-        }
-
-        protected virtual void OnDataAvailable(StreamData streamData)
-        {
-            var eventArgs = new StreamDataEventArgs(streamData);
-            StreamDataHandler?.Invoke(this, eventArgs);
-        }
 
         public bool Configured { get; private set; }
 
@@ -42,88 +47,145 @@ namespace N2.DataStreams
 
         public int QueueLength => _stream.Count;
 
-        private static readonly Random random = new Random();
-
-        public DataStream(StreamConfig streamConfig)
+        /// <param name="streamConfig">The stream configuration.</param>
+        /// <param name="timeProvider">Time source for the timer and time stamps. Defaults to the system clock.</param>
+        /// <param name="valueSource">Produces the value of each data point. Defaults to random demo values.</param>
+        public DataStream(StreamConfig streamConfig, TimeProvider? timeProvider = null, Func<double>? valueSource = null)
         {
-            // Reset configuration
+            _time = timeProvider ?? TimeProvider.System;
+            _valueSource = valueSource ?? (() => 1.0345 * Random.Shared.Next(0, 10000));
+
             StreamType config = StreamType.None;
-            TimeStreamAvailable = false;
             PollingInterval = streamConfig.IntervalInMilliseconds > 0 ? streamConfig.IntervalInMilliseconds : Constants.DefaultPollingInterval;
-            MaximumQueueLength = streamConfig.MaximumQueueLength > 0 ? streamConfig.MaximumQueueLength : Constants.DefaultMaxiumQueueLength;
+            MaximumQueueLength = streamConfig.MaximumQueueLength > 0 ? streamConfig.MaximumQueueLength : Constants.DefaultMaximumQueueLength;
 
-            // Initialize polling timer
-            _timer.Interval = PollingInterval;
-            _timer.Elapsed += TimerElapsed;
-            _timer.AutoReset = true;
-
-            if (streamConfig.AutoStart)
-            {
-                _timer.Start();
-            }
-
-            // Check configuration with the possibilities within this class
-            // A timer is available
+            // Check configuration with the possibilities within this class: a timer is available.
             if ((streamConfig.StreamType & StreamType.Time) == StreamType.Time)
             {
                 TimeStreamAvailable = true;
-
-                _stopwatch.Reset();
-                _stopwatch.Start();
                 config |= StreamType.Time;
             }
             Configured = (streamConfig.StreamType == config) && config != StreamType.None;
+
+            // The timer is created stopped; Start() arms it.
+            _timer = _time.CreateTimer(_ => Tick(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+
+            // Last: everything the first tick needs is set up.
+            if (streamConfig.AutoStart)
+            {
+                Start();
+            }
         }
 
-        private DateTime _lastTime = DateTime.MinValue;
-
-        private void TimerElapsed(object? o, EventArgs e)
+        protected virtual void OnDataAvailable(StreamType streamType, float reliability)
         {
-            var elapsed = _stopwatch.ElapsedMilliseconds;
-            var reliability = (float)(100 - Math.Abs(_timer.Interval - elapsed)) / 100;
+            var eventArgs = new StreamDataAvailableEventArgs(streamType, reliability);
+            Raise(DataAvailableHandler, handler => handler(this, eventArgs));
+        }
 
-            // only add an entry if data is available.
-            // for this 'dataservice' example, a datapoint is available when at least a second has passed
-            var timeNow = DateTime.UtcNow;
-            if ((timeNow - _lastTime).Duration().TotalMilliseconds > 1000)
+        protected virtual void OnDataAvailable(StreamData streamData)
+        {
+            var eventArgs = new StreamDataEventArgs(streamData);
+            Raise(StreamDataHandler, handler => handler(this, eventArgs));
+        }
+
+        // Invokes every subscriber separately, so one failing handler neither crashes the process
+        // (exceptions on a timer thread are fatal) nor prevents the others from running.
+        private void Raise<TDelegate>(TDelegate? handlers, Action<TDelegate> invoke) where TDelegate : Delegate
+        {
+            if (handlers == null)
             {
-                _lastTime = timeNow;
-                var value = 1.0345 * random.Next(0, 10000);
-                var streamData = new StreamData(StreamType.Time, 0, value, reliability, time: timeNow);
+                return;
+            }
+
+            foreach (Delegate handler in handlers.GetInvocationList())
+            {
+                try
+                {
+                    invoke((TDelegate)handler);
+                }
+#pragma warning disable CA1031 // A subscriber must never be able to stop the stream.
+                catch (Exception ex)
+#pragma warning restore CA1031
+                {
+                    ReportHandlerFailure(ex);
+                }
+            }
+        }
+
+        private void ReportHandlerFailure(Exception exception)
+        {
+            try
+            {
+                HandlerFailed?.Invoke(exception);
+            }
+#pragma warning disable CA1031
+            catch (Exception)
+#pragma warning restore CA1031
+            {
+                // Nothing left to report to.
+            }
+        }
+
+        private void Tick()
+        {
+            // Ticks never overlap: a slow handler makes the next tick skip instead of running concurrently.
+            if (_disposed || Interlocked.Exchange(ref _ticking, 1) == 1)
+            {
+                return;
+            }
+
+            try
+            {
+                long now = _time.GetTimestamp();
+                double elapsedMs = _time.GetElapsedTime(Interlocked.Exchange(ref _lastTick, now), now).TotalMilliseconds;
+
+                if (!TimeStreamAvailable)
+                {
+                    return;
+                }
+
+                // 1.0 = on time; falls to 0.0 when a tick is 100 ms or more away from the polling interval.
+                float reliability = (float)Math.Clamp((100 - Math.Abs(PollingInterval - elapsedMs)) / 100, 0.0, 1.0);
+
+                var streamData = new StreamData(StreamType.Time, 0, _valueSource(), reliability, time: _time.GetUtcNow().UtcDateTime);
                 PushData(streamData);
                 OnDataAvailable(StreamType.Time, reliability);
                 OnDataAvailable(streamData);
             }
-            _stopwatch.Restart();
+            finally
+            {
+                Volatile.Write(ref _ticking, 0);
+            }
         }
 
+        // FIFO with drop-oldest. The lock keeps the bound exact with concurrent producers.
         private void PushData(StreamData streamData)
         {
-            if (_stream.Count >= MaximumQueueLength)
+            lock (_queueLock)
             {
-                _stream.TryPop(out _);
+                _stream.Enqueue(streamData);
+                while (_stream.Count > MaximumQueueLength)
+                {
+                    _stream.TryDequeue(out _);
+                }
             }
-            _stream.Push(streamData);
         }
 
         protected virtual void Dispose(bool disposing)
         {
-            if (!disposedValue)
+            if (_disposed)
             {
-                if (disposing)
-                {
-                    // dispose managed state (managed objects)
-                    if (_timer != null)
-                    {
-                        _timer.Elapsed -= TimerElapsed;
-                        _timer.Stop();
-                        _timer.Dispose();
-                    }
-                }
+                return;
+            }
 
-                // free unmanaged resources (unmanaged objects) and override finalizer
-                // set large fields to null
-                disposedValue = true;
+            _disposed = true;
+            if (disposing)
+            {
+                _timer.Dispose();
+                StreamDataHandler = null;
+                DataAvailableHandler = null;
+                HandlerFailed = null;
             }
         }
 
@@ -135,24 +197,35 @@ namespace N2.DataStreams
 
         public void Start()
         {
-            _timer.Start();
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            Interlocked.Exchange(ref _lastTick, _time.GetTimestamp());
+            _timer.Change(TimeSpan.FromMilliseconds(PollingInterval), TimeSpan.FromMilliseconds(PollingInterval));
         }
 
         public void Stop()
         {
-            _timer.Stop();
+            if (_disposed)
+            {
+                return;
+            }
+
+            _timer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
         }
 
-        public StreamData NextResult()
-        {
-            if (_stream.IsEmpty) return default(StreamData);
-            _stream.TryPop(out var data);
-            return data;
-        }
+        /// <summary>
+        /// Removes and returns the oldest item, or <c>default</c> when the queue is empty.
+        /// Prefer <see cref="TryNextResult"/>, which tells the two cases apart.
+        /// </summary>
+        public StreamData NextResult() => _stream.TryDequeue(out StreamData data) ? data : default;
+
+        public bool TryNextResult(out StreamData data) => _stream.TryDequeue(out data);
 
         public void ResetQueue()
         {
-            _stream.Clear();
+            lock (_queueLock)
+            {
+                _stream.Clear();
+            }
         }
     }
 }

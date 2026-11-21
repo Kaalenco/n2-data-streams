@@ -1,5 +1,6 @@
-﻿namespace N2.DataStreams
+namespace N2.DataStreams
 {
+    [Flags]
     [System.Text.Json.Serialization.JsonConverter(typeof(System.Text.Json.Serialization.JsonStringEnumConverter))]
     public enum StreamType
     {

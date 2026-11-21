@@ -1,106 +1,112 @@
-﻿using System.IO.Compression;
+using System.Buffers.Binary;
+using System.IO.Compression;
 using System.Text.Json;
 
 namespace N2.DataStreams
 {
     public static class StreamDataExtensions
     {
+        /// <summary>
+        /// The default maximum size of decompressed data, as protection against decompression bombs.
+        /// </summary>
+        public const int DefaultMaxDecompressedBytes = 16 * 1024 * 1024;
+
         public static byte[] GetBytes<T>(this T value)
         {
             var bytes = JsonSerializer.SerializeToUtf8Bytes(value);
             return Compress(bytes);
         }
 
-        public static T? Deserialize<T>(this byte[] data)
+        /// <exception cref="InvalidDataException">The data is not valid, or it expands beyond <paramref name="maxDecompressedBytes"/>.</exception>
+        public static T? Deserialize<T>(this byte[] data, int maxDecompressedBytes = DefaultMaxDecompressedBytes)
         {
-            var bytes = Decompress(data);
-            var readOnlySpan = new ReadOnlySpan<byte>(bytes);
-            return JsonSerializer.Deserialize<T>(readOnlySpan);
+            ArgumentNullException.ThrowIfNull(data);
+            var bytes = Decompress(data, maxDecompressedBytes);
+            return JsonSerializer.Deserialize<T>(new ReadOnlySpan<byte>(bytes));
         }
 
         public static Crc Double(this Crc crc, double value)
         {
-            var bytes = BitConverter.GetBytes(value);
-            for (var i = 0; i < bytes.Length; i++)
-            {
-                AddValue(crc, bytes[i]);
-            }
+            Span<byte> bytes = stackalloc byte[8];
+            BinaryPrimitives.WriteInt64LittleEndian(bytes, BitConverter.DoubleToInt64Bits(value));
+            crc.Update(bytes);
             return crc;
         }
 
         public static Crc Float(this Crc crc, float value)
         {
-            var bytes = BitConverter.GetBytes(value);
-            for (var i = 0; i < bytes.Length; i++)
-            {
-                AddValue(crc, bytes[i]);
-            }
+            Span<byte> bytes = stackalloc byte[4];
+            BinaryPrimitives.WriteInt32LittleEndian(bytes, BitConverter.SingleToInt32Bits(value));
+            crc.Update(bytes);
             return crc;
         }
 
         public static Crc Integer(this Crc crc, int value)
         {
-            for (var i = 0; i < 2; i++)
-            {
-                var low = value & 0xFFFF;
-                AddValue(crc, (ushort)low);
-                value = value >> 16;
-            }
+            Span<byte> bytes = stackalloc byte[4];
+            BinaryPrimitives.WriteInt32LittleEndian(bytes, value);
+            crc.Update(bytes);
             return crc;
-        }
-
-        public static Crc Geo(this Crc crc, Geoposition value)
-        {
-            return crc
-                .Integer(value.Altitude)
-                .Long((long)value.Latitude * 1000000)
-                .Long((long)value.Longitude * 1000000);
         }
 
         public static Crc Long(this Crc crc, long value)
         {
-            for (var i = 0; i < 4; i++)
-            {
-                var low = value & 0xFFFF;
-                AddValue(crc, (ushort)low);
-                value = value >> 16;
-            }
+            Span<byte> bytes = stackalloc byte[8];
+            BinaryPrimitives.WriteInt64LittleEndian(bytes, value);
+            crc.Update(bytes);
             return crc;
         }
 
-        public static Crc DateTime(this Crc crc, DateTime value)
+        /// <summary>
+        /// Adds the position. Latitude and longitude are scaled to micro-degrees, rounded (not truncated).
+        /// </summary>
+        public static Crc Geo(this Crc crc, Geoposition value)
         {
-            return crc.Long(value.Ticks);
+            return crc
+                .Integer(value.Altitude)
+                .Long((long)Math.Round(value.Latitude * 1_000_000d))
+                .Long((long)Math.Round(value.Longitude * 1_000_000d));
         }
 
-        private static void AddValue(Crc crc, ushort value)
+        /// <summary>
+        /// Adds the time as UTC ticks (local times are converted first).
+        /// </summary>
+        public static Crc DateTime(this Crc crc, DateTime value)
         {
-            var val = crc.Value;
-            val = (val * 2) ^ value;
-            if ((val & 0x10000) != 0)
-            {
-                val = val ^ 0x8001;
-            }
-            crc.Value = val;
+            var utc = value.Kind == DateTimeKind.Local ? value.ToUniversalTime() : value;
+            return crc.Long(utc.Ticks);
         }
 
         private static byte[] Compress(byte[] data)
         {
-            MemoryStream output = new MemoryStream();
-            using (DeflateStream dstream = new DeflateStream(output, CompressionLevel.Optimal))
+            using var output = new MemoryStream();
+            using (var dstream = new DeflateStream(output, CompressionLevel.Optimal, leaveOpen: true))
             {
                 dstream.Write(data, 0, data.Length);
             }
             return output.ToArray();
         }
 
-        private static byte[] Decompress(byte[] data)
+        private static byte[] Decompress(byte[] data, int maxDecompressedBytes)
         {
-            MemoryStream input = new MemoryStream(data);
-            MemoryStream output = new MemoryStream();
-            using (DeflateStream dstream = new DeflateStream(input, CompressionMode.Decompress))
+            if (maxDecompressedBytes <= 0)
             {
-                dstream.CopyTo(output);
+                throw new ArgumentOutOfRangeException(nameof(maxDecompressedBytes));
+            }
+
+            using var input = new MemoryStream(data);
+            using var output = new MemoryStream();
+            using var dstream = new DeflateStream(input, CompressionMode.Decompress);
+
+            var buffer = new byte[8192];
+            int read;
+            while ((read = dstream.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                if (output.Length + read > maxDecompressedBytes)
+                {
+                    throw new InvalidDataException($"Decompressed data exceeds the limit of {maxDecompressedBytes} bytes.");
+                }
+                output.Write(buffer, 0, read);
             }
             return output.ToArray();
         }

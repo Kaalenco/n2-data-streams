@@ -1,4 +1,4 @@
-﻿namespace N2.DataStreams
+namespace N2.DataStreams
 {
     public interface IDataStreamManager
     {
@@ -20,7 +20,7 @@
         /// <summary>
         /// Create the client using the name to select the client.
         /// </summary>
-        /// <param name="streamName"></param>
+        /// <param name="streamName">The name of the stream.</param>
         /// <returns></returns>
         IDataStream CreateClient(string streamName);
 
@@ -42,7 +42,7 @@
         /// Save the current stream configuration to a file.
         /// Returns the number of characters written to the config file.
         /// </summary>
-        /// <param name="streamName"></param>
-        int SaveConfig(string streamName);
+        /// <param name="path">The file to write.</param>
+        int SaveConfig(string path);
     }
 }
