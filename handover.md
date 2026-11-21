@@ -123,6 +123,32 @@ Keep the library and test TFMs identical so every TFM is actually tested.
 **It should not be shipped as production-ready until every Critical and High item below is closed and covered by tests.**
 If that is not feasible for the 2.0.0 release, ship it marked `[Experimental]` (or `[Obsolete]`) as an interim step. The owner chose "harden in place", so the fixes follow.
 
+### Status (updated after the AS2 rewrite)
+
+Done and covered by tests (`AS2Should`, 44 test cases, all passing on net10; net11 is verified by CI only):
+- C-1 compile errors: `X509CertificateLoader`, `HttpClient`, nullability.
+- C-2 #1 path traversal: nothing from the message is a file name. Files get a generated name, are created with `CreateNew`, and the resolved path is checked against the drop directory.
+- C-2 #2 signatures: verified with `SignedCms`, and pinned to the registered partner certificate (exact match, validity dates checked). Unsigned messages are rejected by default.
+- C-2 #3 size and partial reads: a configurable maximum message size (413), no allocation from `Content-Length`. The host reads the body into `AS2ReceivedMessage`.
+- C-2 #4 `DmnMessage`: **removed**, including its hardcoded placeholders. MDN generation is *not* implemented (see below).
+- C-3 #5 `Decrypt` returned the wrong data: now returns `ContentInfo.Content`; round-trip tests for AES-256, AES-128 and 3DES.
+- C-3 #6 crypto: SHA-256 signing with `micalg="sha-256"`, AES-256 default, 3DES only as an explicit legacy option (receivers reject it unless `AllowLegacyEncryption`), RC2 removed. `EncryptionAlgorithm` values are now `const`.
+- C-3 #7 parsing: bounds-checked byte-exact parser, returns `false` instead of throwing; malformed input gives 400/401.
+- C-3 #8 line endings: CRLF everywhere.
+- C-3 #9 `GetMessage`/`BadRequest` writing JSON+deflate: removed with the old receive classes.
+- C-3 #10 sender: unique `Message-Id`, no automatic redirects, https required (opt-out for local tests), validated header values and file names, `HttpClient` + `CancellationToken`.
+- C-3 #11 listener: `A2Listener`/`IHttpContext`/`AS2Receive` replaced by `AS2Receiver` (host-agnostic, takes an `AS2ReceivedMessage`).
+- C-4 #12 (partly), #13 payload is bytes end to end, #14 no HTML is produced, #16 replay protection: Message-Ids are remembered for `DuplicateWindow` (in memory, per process).
+
+**Breaking API changes (2.0.0):** `AS2Send.SendFile(...)` becomes `SendFileAsync(HttpClient, AS2SendOptions, ...)`; `AS2Receive`, `A2Listener`, `IHttpContext` and `DmnMessage` are gone; `ProxySettings` is a class; `EncryptionAlgorithm.RC2` is gone; certificates are passed as `X509Certificate2` objects.
+
+Still open:
+- **MDN (receipt) generation and verification is not implemented.** Partners that require a signed MDN will not accept this receiver yet. The sender does not process the partner's MDN either, so a 200 means "HTTP accepted", not "partner processed it".
+- The duplicate-detection store is in memory. Across restarts or several instances, back it with shared storage.
+- Certificate chain validation is deliberately replaced by pinning. Certificate revocation is not checked.
+- Logging (`ILogger`), rate limiting and request authentication beyond the signature are left to the host.
+- An ASP.NET Core endpoint sample (read the body with a size limit, call `AS2Receiver.Process`, return `StatusCode`/`Reason`).
+
 ### C-1. Will not compile cleanly on net10/net11 (warnings are errors here)
 - `HttpWebRequest`, `WebRequest.Create` and `WebProxy` usage: SYSLIB0014 (obsolete). Rewrite `AS2Send` on `HttpClient` (injected, with `SocketsHttpHandler`/`IHttpClientFactory`) and make it async with `CancellationToken`.
 - `new X509Certificate2(path[, password])` in `AS2Encryption`: SYSLIB0057 (obsolete since .NET 9). Use `X509CertificateLoader.LoadCertificateFromFile` and `LoadPkcs12FromFile` (with `X509KeyStorageFlags.EphemeralKeySet`). Dispose the certificate.

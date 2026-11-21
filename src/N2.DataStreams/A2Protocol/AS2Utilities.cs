@@ -1,237 +1,272 @@
-﻿using System.Security.Cryptography.Pkcs;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 
 namespace N2.DataStreams.A2Protocol;
 
 /// <summary>
-/// Contains a number of useful static functions for creating MIME messages.
+/// The parts of a parsed <c>multipart/signed</c> message.
+/// </summary>
+/// <param name="SignedPart">The exact bytes that the signature covers (MIME headers and body of the first part).</param>
+/// <param name="Signature">The decoded detached CMS signature.</param>
+/// <param name="Payload">The body of the first part (the business payload).</param>
+/// <param name="PayloadContentType">The Content-Type of the first part, if present.</param>
+public sealed record SignedMessageParts(byte[] SignedPart, byte[] Signature, byte[] Payload, string? PayloadContentType);
+
+/// <summary>
+/// Helpers for creating and parsing the MIME structures used by AS2.
+/// All line endings are CRLF, as required by the RFCs, on every platform.
 /// </summary>
 public static class AS2Utilities
 {
+    public const string Crlf = "\r\n";
     public const string MESSAGE_SEPARATOR = "\r\n\r\n";
 
-    /// <summary>
-    /// Extracts the payload from a signed message, by looking for boundaries
-    /// Ignores signatures and does checking - should really validate the signature
-    /// </summary>
-    public static string ExtractPayload(string message, string contentType)
-    {
-        string boundary = GetBoundaryFromContentType(contentType);
-
-        if (!boundary.StartsWith("--"))
-            boundary = "--" + boundary;
-
-        int firstBoundary = message.IndexOf(boundary);
-        int blankLineAfterBoundary = message.IndexOf(MESSAGE_SEPARATOR, firstBoundary) + (MESSAGE_SEPARATOR).Length;
-        int nextBoundary = message.IndexOf(MESSAGE_SEPARATOR + boundary, blankLineAfterBoundary);
-        int payloadLength = nextBoundary - blankLineAfterBoundary;
-
-        return message.Substring(blankLineAfterBoundary, payloadLength);
-    }
+    private const int MaxBoundaryLength = 70;
 
     /// <summary>
-    /// Extracts the boundary from a Content-Type string
+    /// Extracts the boundary from a Content-Type value, for example
+    /// <c>multipart/signed; protocol="application/pkcs7-signature"; boundary="_abc_"</c>.
+    /// Returns <c>null</c> when there is no usable boundary.
     /// </summary>
-    /// <param name="contentType">e.g: multipart/signed; protocol="application/pkcs7-signature"; micalg="sha1"; boundary="_956100ef6a82431fb98f65ee70c00cb9_"</param>
-    /// <returns>e.g: _956100ef6a82431fb98f65ee70c00cb9_</returns>
-    public static string GetBoundaryFromContentType(string contentType)
+    public static string? GetBoundaryFromContentType(string? contentType)
     {
-        return Trim(contentType, "boundary=\"", "\"");
-    }
-
-    /// <summary>
-    /// Trims the string from the end of startString until endString
-    /// </summary>
-    private static string Trim(string str, string start, string end)
-    {
-        int startIndex = str.IndexOf(start) + start.Length;
-        int endIndex = str.IndexOf(end, startIndex);
-        int length = endIndex - startIndex;
-
-        return str.Substring(startIndex, length);
-    }
-
-    internal static byte[] Decrypt(byte[] encodedEncryptedMessage)
-    {
-        EnvelopedCms envelopedCms = new EnvelopedCms();
-        envelopedCms.Decode(encodedEncryptedMessage);
-        envelopedCms.Decrypt();
-        return envelopedCms.Encode();
-    }
-
-    /// <summary>
-    /// return a unique MIME style boundary
-    /// this needs to be unique enought not to occur within the data
-    /// and so is a Guid without - or { } characters.
-    /// </summary>
-    /// <returns></returns>
-    private static string MIMEBoundary()
-    {
-        return "_" + Guid.NewGuid().ToString("N") + "_";
-    }
-
-    /// <summary>
-    /// Creates the a Mime header out of the components listed.
-    /// </summary>
-    /// <param name="sContentType">Content type</param>
-    /// <param name="sEncoding">Encoding method</param>
-    /// <param name="sDisposition">Disposition options</param>
-    /// <returns>A string containing the three headers.</returns>
-    public static string MIMEHeader(string sContentType, string sEncoding, string sDisposition)
-    {
-        string sOut = "";
-
-        sOut = "Content-Type: " + sContentType + Environment.NewLine;
-        if (sEncoding != "")
-            sOut += "Content-Transfer-Encoding: " + sEncoding + Environment.NewLine;
-
-        if (sDisposition != "")
-            sOut += "Content-Disposition: " + sDisposition + Environment.NewLine;
-
-        sOut = sOut + Environment.NewLine;
-
-        return sOut;
-    }
-
-    /// <summary>
-    /// Return a single array of bytes out of all the supplied byte arrays.
-    /// </summary>
-    /// <param name="arBytes">Byte arrays to add</param>
-    /// <returns>The single byte array.</returns>
-    public static byte[] ConcatBytes(params byte[][] arBytes)
-    {
-        long lLength = 0;
-        long lPosition = 0;
-
-        //Get total size required.
-        foreach (byte[] ar in arBytes)
-            lLength += ar.Length;
-
-        //Create new byte array
-        byte[] toReturn = new byte[lLength];
-
-        //Fill the new byte array
-        foreach (byte[] ar in arBytes)
+        if (string.IsNullOrEmpty(contentType))
         {
-            ar.CopyTo(toReturn, lPosition);
-            lPosition += ar.Length;
+            return null;
         }
 
-        return toReturn;
-    }
-
-    /// <summary>
-    /// Create a Message out of byte arrays (this makes more sense than the above method)
-    /// </summary>
-    /// <param name="sContentType">Content type ie multipart/report</param>
-    /// <param name="sEncoding">The encoding provided...</param>
-    /// <param name="sDisposition">The disposition of the message...</param>
-    /// <param name="abMessageParts">The byte arrays that make up the components</param>
-    /// <returns>The message as a byte array.</returns>
-    public static byte[] CreateMessage(string sContentType, string sEncoding, string sDisposition, params byte[][] abMessageParts)
-    {
-        return CreateMessage(sContentType, sEncoding, sDisposition, out var iHeaderLength, abMessageParts);
-    }
-
-    /// <summary>
-    /// Create a Message out of byte arrays (this makes more sense than the above method)
-    /// </summary>
-    /// <param name="sContentType">Content type ie multipart/report</param>
-    /// <param name="sEncoding">The encoding provided...</param>
-    /// <param name="sDisposition">The disposition of the message...</param>
-    /// <param name="iHeaderLength">The length of the headers.</param>
-    /// <param name="abMessageParts">The message parts.</param>
-    /// <returns>The message as a byte array.</returns>
-    public static byte[] CreateMessage(string sContentType, string sEncoding, string sDisposition, out int iHeaderLength, params byte[][] abMessageParts)
-    {
-        long lLength = 0;
-        long lPosition = 0;
-
-        //Only one part... Add headers only...
-        if (abMessageParts.Length == 1)
+        const string key = "boundary=";
+        int index = contentType.IndexOf(key, StringComparison.OrdinalIgnoreCase);
+        if (index < 0)
         {
-            byte[] bHeader = ASCIIEncoding.ASCII.GetBytes(MIMEHeader(sContentType, sEncoding, sDisposition));
-            iHeaderLength = bHeader.Length;
-            return ConcatBytes(bHeader, abMessageParts[0]);
+            return null;
+        }
+
+        int start = index + key.Length;
+        string boundary;
+        if (start < contentType.Length && contentType[start] == '"')
+        {
+            int end = contentType.IndexOf('"', start + 1);
+            if (end < 0)
+            {
+                return null;
+            }
+            boundary = contentType.Substring(start + 1, end - start - 1);
         }
         else
         {
-            // get boundary and "static" subparts.
-            string sBoundary = MIMEBoundary();
-            byte[] bPackageHeader = ASCIIEncoding.ASCII.GetBytes(MIMEHeader(sContentType + "; boundary=\"" + sBoundary + "\"", sEncoding, sDisposition));
-            byte[] bBoundary = ASCIIEncoding.ASCII.GetBytes(Environment.NewLine + "--" + sBoundary + Environment.NewLine);
-            byte[] bFinalFooter = ASCIIEncoding.ASCII.GetBytes(Environment.NewLine + "--" + sBoundary + "--" + Environment.NewLine);
-
-            //Calculate the total size required.
-            iHeaderLength = bPackageHeader.Length;
-
-            foreach (byte[] ar in abMessageParts)
-                lLength += ar.Length;
-            lLength += iHeaderLength + (bBoundary.Length * abMessageParts.Length) +
-                bFinalFooter.Length;
-
-            //Create new byte array to that size.
-            byte[] toReturn = new byte[lLength];
-
-            //Copy the headers in.
-            bPackageHeader.CopyTo(toReturn, lPosition);
-            lPosition += bPackageHeader.Length;
-
-            //Fill the new byte array in by coping the message parts.
-            foreach (byte[] ar in abMessageParts)
-            {
-                bBoundary.CopyTo(toReturn, lPosition);
-                lPosition += bBoundary.Length;
-
-                ar.CopyTo(toReturn, lPosition);
-                lPosition += ar.Length;
-            }
-
-            //Finally add the footer boundary.
-            bFinalFooter.CopyTo(toReturn, lPosition);
-
-            return toReturn;
+            int end = contentType.IndexOf(';', start);
+            boundary = (end < 0 ? contentType.Substring(start) : contentType.Substring(start, end - start)).Trim();
         }
+
+        return boundary.Length is > 0 and <= MaxBoundaryLength ? boundary : null;
     }
 
     /// <summary>
-    /// Signs a message and returns a MIME encoded array of bytes containing the signature.
+    /// Returns the value of a header from a block of MIME headers, or <c>null</c>.
     /// </summary>
-    /// <returns></returns>
-    public static byte[] Sign(
-        byte[] arMessage,
-        string signerCert,
-
-        string signerPassword, out string sContentType)
+    public static string? GetHeader(string headerBlock, string name)
     {
-        byte[] bInPKCS7 = new byte[0];
+        ArgumentNullException.ThrowIfNull(headerBlock);
+        string prefix = name + ":";
+        string[] lines = headerBlock.Split(["\r\n"], StringSplitOptions.None);
+        for (int i = 0; i < lines.Length; i++)
+        {
+            if (!lines[i].StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
 
-        // get a MIME boundary
-        string sBoundary = MIMEBoundary();
+            var value = new StringBuilder(lines[i].Substring(prefix.Length).Trim());
+            // header folding: continuation lines start with whitespace
+            while (i + 1 < lines.Length && lines[i + 1].Length > 0 && (lines[i + 1][0] == ' ' || lines[i + 1][0] == '\t'))
+            {
+                i++;
+                value.Append(' ').Append(lines[i].Trim());
+            }
+            return value.ToString();
+        }
+        return null;
+    }
 
-        // Get the Headers for the entire message.
-        sContentType = "multipart/signed; protocol=\"application/pkcs7-signature\"; micalg=\"sha1\"; boundary=\"" + sBoundary + "\"";
+    /// <summary>
+    /// Parses a <c>multipart/signed</c> body into its signed part, signature and payload.
+    /// Never throws on malformed input; it returns <c>false</c> instead.
+    /// </summary>
+    public static bool TryParseSignedMessage(byte[] body, string? contentType, out SignedMessageParts? parts)
+    {
+        parts = null;
+        ArgumentNullException.ThrowIfNull(body);
 
-        // Define the boundary byte array.
-        byte[] bBoundary = ASCIIEncoding.ASCII.GetBytes(Environment.NewLine + "--" + sBoundary + Environment.NewLine);
+        string? boundary = GetBoundaryFromContentType(contentType);
+        if (boundary == null)
+        {
+            return false;
+        }
 
-        // Encode the header for the signature portion.
-        byte[] bSignatureHeader = ASCIIEncoding.ASCII.GetBytes(MIMEHeader("application/pkcs7-signature; name=\"smime.p7s\"", "base64", "attachment; filename=smime.p7s"));
+        // Latin1 maps bytes to chars one-to-one, so offsets and bytes round-trip exactly.
+        string s = Encoding.Latin1.GetString(body);
+        string delimiter = "--" + boundary;
+        string crlfDelimiter = Crlf + delimiter;
 
-        // Get the signature.
-        byte[] bSignature = AS2Encryption.Encode(arMessage, signerCert, signerPassword);
+        int first = s.StartsWith(delimiter, StringComparison.Ordinal) ? 0 : s.IndexOf(crlfDelimiter, StringComparison.Ordinal) + 2;
+        if (first < 2 && !s.StartsWith(delimiter, StringComparison.Ordinal))
+        {
+            return false;
+        }
 
-        // convert to base64
-        string sig = Convert.ToBase64String(bSignature) + MESSAGE_SEPARATOR;
-        bSignature = System.Text.ASCIIEncoding.ASCII.GetBytes(sig);
+        int part1Start = first + delimiter.Length;
+        if (!s.AsSpan(part1Start).StartsWith(Crlf, StringComparison.Ordinal))
+        {
+            return false;
+        }
+        part1Start += 2;
 
-        // Calculate the final footer elements.
-        byte[] bFinalFooter = ASCIIEncoding.ASCII.GetBytes("--" + sBoundary + "--" + Environment.NewLine);
+        int second = s.IndexOf(crlfDelimiter, part1Start, StringComparison.Ordinal);
+        if (second < 0)
+        {
+            return false;
+        }
 
-        // Concatenate all the above together to form the message.
-        bInPKCS7 = ConcatBytes(bBoundary, arMessage, bBoundary,
-            bSignatureHeader, bSignature, bFinalFooter);
+        int part2Start = second + crlfDelimiter.Length;
+        if (!s.AsSpan(part2Start).StartsWith(Crlf, StringComparison.Ordinal))
+        {
+            return false;
+        }
+        part2Start += 2;
 
-        return bInPKCS7;
+        int third = s.IndexOf(crlfDelimiter, part2Start, StringComparison.Ordinal);
+        if (third < 0)
+        {
+            return false;
+        }
+
+        string part1 = s.Substring(part1Start, second - part1Start);
+        string part2 = s.Substring(part2Start, third - part2Start);
+
+        // Signature part
+        int sigSeparator = part2.IndexOf(MESSAGE_SEPARATOR, StringComparison.Ordinal);
+        if (sigSeparator < 0
+            || part2.IndexOf("application/pkcs7-signature", 0, sigSeparator, StringComparison.OrdinalIgnoreCase) < 0)
+        {
+            return false;
+        }
+
+        string base64 = RemoveWhitespace(part2.Substring(sigSeparator + MESSAGE_SEPARATOR.Length));
+        var signature = new byte[(base64.Length * 3 / 4) + 3];
+        if (!Convert.TryFromBase64String(base64, signature, out int written) || written == 0)
+        {
+            return false;
+        }
+        Array.Resize(ref signature, written);
+
+        // Payload: the body of the first part
+        int payloadSeparator = part1.IndexOf(MESSAGE_SEPARATOR, StringComparison.Ordinal);
+        if (payloadSeparator < 0)
+        {
+            return false;
+        }
+
+        string payloadHeaders = part1.Substring(0, payloadSeparator);
+        string payload = part1.Substring(payloadSeparator + MESSAGE_SEPARATOR.Length);
+
+        parts = new SignedMessageParts(
+            Encoding.Latin1.GetBytes(part1),
+            signature,
+            Encoding.Latin1.GetBytes(payload),
+            GetHeader(payloadHeaders, "Content-Type"));
+        return true;
+    }
+
+    private static string RemoveWhitespace(string value)
+    {
+        var sb = new StringBuilder(value.Length);
+        foreach (char c in value)
+        {
+            if (!char.IsWhiteSpace(c))
+            {
+                sb.Append(c);
+            }
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Returns a unique MIME boundary (a GUID without punctuation).
+    /// </summary>
+    private static string MimeBoundary() => "_" + Guid.NewGuid().ToString("N") + "_";
+
+    /// <summary>
+    /// Creates a MIME header block (terminated by an empty line).
+    /// </summary>
+    public static string MIMEHeader(string contentType, string encoding, string disposition)
+    {
+        var sb = new StringBuilder();
+        sb.Append("Content-Type: ").Append(contentType).Append(Crlf);
+        if (encoding.Length > 0)
+        {
+            sb.Append("Content-Transfer-Encoding: ").Append(encoding).Append(Crlf);
+        }
+        if (disposition.Length > 0)
+        {
+            sb.Append("Content-Disposition: ").Append(disposition).Append(Crlf);
+        }
+        sb.Append(Crlf);
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Returns a single array of bytes out of all the supplied byte arrays.
+    /// </summary>
+    public static byte[] ConcatBytes(params byte[][] arBytes)
+    {
+        ArgumentNullException.ThrowIfNull(arBytes);
+        long length = 0;
+        foreach (byte[] ar in arBytes)
+        {
+            length += ar.Length;
+        }
+
+        byte[] result = new byte[length];
+        long position = 0;
+        foreach (byte[] ar in arBytes)
+        {
+            ar.CopyTo(result, position);
+            position += ar.Length;
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Creates a single-part MIME entity: headers followed by the payload bytes.
+    /// </summary>
+    public static byte[] CreateMessage(string contentType, string encoding, string disposition, byte[] payload)
+    {
+        ArgumentNullException.ThrowIfNull(payload);
+        byte[] header = Encoding.ASCII.GetBytes(MIMEHeader(contentType, encoding, disposition));
+        return ConcatBytes(header, payload);
+    }
+
+    /// <summary>
+    /// Signs a message and returns the <c>multipart/signed</c> body. The signature is SHA-256,
+    /// announced as <c>micalg="sha-256"</c>.
+    /// </summary>
+    public static byte[] Sign(byte[] message, X509Certificate2 signerCertificate, out string contentType)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ArgumentNullException.ThrowIfNull(signerCertificate);
+
+        string boundary = MimeBoundary();
+        contentType = "multipart/signed; protocol=\"application/pkcs7-signature\"; micalg=\"sha-256\"; boundary=\"" + boundary + "\"";
+
+        byte[] boundaryLine = Encoding.ASCII.GetBytes(Crlf + "--" + boundary + Crlf);
+        byte[] signatureHeader = Encoding.ASCII.GetBytes(
+            MIMEHeader("application/pkcs7-signature; name=\"smime.p7s\"", "base64", "attachment; filename=smime.p7s"));
+        byte[] signature = Encoding.ASCII.GetBytes(
+            Convert.ToBase64String(AS2Encryption.Encode(message, signerCertificate), Base64FormattingOptions.InsertLineBreaks)
+            + MESSAGE_SEPARATOR);
+        byte[] footer = Encoding.ASCII.GetBytes("--" + boundary + "--" + Crlf);
+
+        return ConcatBytes(boundaryLine, message, boundaryLine, signatureHeader, signature, footer);
     }
 }
