@@ -46,7 +46,7 @@ namespace DataStreams.UnitTests
             Assert.IsNotNull(sut);
         }
 
-        [DataTestMethod]
+        [TestMethod]
         [DataRow("C:\\Temp\\example.json")]
         public void InitializeUsingConfigFile(string configFile)
         {
@@ -65,7 +65,7 @@ namespace DataStreams.UnitTests
             Assert.IsNotNull(client);
         }
 
-        [DataTestMethod]
+        [TestMethod]
         [DataRow(StreamType.Position, false)]
         [DataRow(StreamType.Time | StreamType.Position, false)]
         [DataRow(StreamType.Time, true)]
