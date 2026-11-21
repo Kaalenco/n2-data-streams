@@ -7,7 +7,7 @@ public class AS2Encryption
 {
     internal static byte[] Encode(byte[] arMessage, string signerCert, string signerPassword)
     {
-        X509Certificate2 cert = new X509Certificate2(signerCert, signerPassword);
+        X509Certificate2 cert = X509CertificateLoader.LoadPkcs12FromFile(signerCert, signerPassword);
         ContentInfo contentInfo = new ContentInfo(arMessage);
 
         SignedCms signedCms = new SignedCms(contentInfo, true); // <- true detaches the signature
@@ -24,7 +24,7 @@ public class AS2Encryption
         if (!string.Equals(encryptionAlgorithm, EncryptionAlgorithm.DES3) && !string.Equals(encryptionAlgorithm, EncryptionAlgorithm.RC2))
             throw new ArgumentException("encryptionAlgorithm argument must be 3DES or RC2 - value specified was:" + encryptionAlgorithm);
 
-        X509Certificate2 cert = new X509Certificate2(recipientCert);
+        X509Certificate2 cert = X509CertificateLoader.LoadCertificateFromFile(recipientCert);
 
         ContentInfo contentInfo = new ContentInfo(message);
 
@@ -50,7 +50,7 @@ public class AS2Encryption
         envelopedCms.Decode(encodedEncryptedMessage);
 
         envelopedCms.Decrypt();
-        encryptionAlgorithmName = envelopedCms.ContentEncryptionAlgorithm.Oid.FriendlyName;
+        encryptionAlgorithmName = envelopedCms.ContentEncryptionAlgorithm.Oid.FriendlyName ?? string.Empty;
 
         return envelopedCms.Encode();
     }

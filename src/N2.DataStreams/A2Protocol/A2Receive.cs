@@ -28,7 +28,7 @@ public class A2Listener
                 //Invalid AS2 Request.
                 //Section 6.2 The AS2-To and AS2-From header fields MUST be present
                 //    in all AS2 messages
-                if (!(context.Request.Method == "GET" && context.QueryString[0].Length == 0))
+                if (!(context.Request.Method == "GET" && string.IsNullOrEmpty(context.QueryString[0])))
                 {
                     AS2Receive.BadRequest(context.Response, "Invalid or unauthorized AS2 request received.");
                 }
@@ -141,18 +141,19 @@ public static class AS2Receive
 
     public static void Process(WebRequest request, string dropLocation)
     {
-        string filename = request.Headers["Subject"];
+        string filename = request.Headers["Subject"] ?? throw new InvalidDataException("Missing Subject header.");
         byte[] data = new byte[request.ContentLength];
         _ = request.GetRequestStream().Read(data, 0, data.Length);
-        bool isEncrypted = request.ContentType.Contains("application/pkcs7-mime");
-        bool isSigned = request.ContentType.Contains("application/pkcs7-signature");
+        string requestContentType = request.ContentType ?? string.Empty;
+        bool isEncrypted = requestContentType.Contains("application/pkcs7-mime");
+        bool isSigned = requestContentType.Contains("application/pkcs7-signature");
 
         string message = string.Empty;
 
         if (isSigned)
         {
             string messageWithMIMEHeaders = Encoding.ASCII.GetString(data);
-            string contentType = request.Headers["Content-Type"];
+            string contentType = request.Headers["Content-Type"] ?? requestContentType;
 
             message = AS2Utilities.ExtractPayload(messageWithMIMEHeaders, contentType);
         }

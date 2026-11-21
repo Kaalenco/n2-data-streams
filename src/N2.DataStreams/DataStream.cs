@@ -77,7 +77,7 @@ namespace N2.DataStreams
 
         private DateTime _lastTime = DateTime.MinValue;
 
-        private void TimerElapsed(object o, EventArgs e)
+        private void TimerElapsed(object? o, EventArgs e)
         {
             var elapsed = _stopwatch.ElapsedMilliseconds;
             var reliability = (float)(100 - Math.Abs(_timer.Interval - elapsed)) / 100;

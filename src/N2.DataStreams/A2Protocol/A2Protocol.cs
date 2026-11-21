@@ -22,54 +22,49 @@ public class AS2Send
 
         byte[] content = fileData;
 
-        //Initialise the request
-        HttpWebRequest http = (HttpWebRequest)WebRequest.Create(uri);
-
+        // Configure the handler (optional proxy)
+        using var handler = new HttpClientHandler { AllowAutoRedirect = true };
         if (!String.IsNullOrEmpty(proxySettings.Name))
         {
-            WebProxy proxy = new WebProxy(proxySettings.Name);
-
-            NetworkCredential proxyCredential = new NetworkCredential();
-            proxyCredential.Domain = proxySettings.Domain;
-            proxyCredential.UserName = proxySettings.Username;
-            proxyCredential.Password = proxySettings.Password;
-
-            proxy.Credentials = proxyCredential;
-
-            http.Proxy = proxy;
+            var proxy = new WebProxy(proxySettings.Name)
+            {
+                Credentials = new NetworkCredential
+                {
+                    Domain = proxySettings.Domain,
+                    UserName = proxySettings.Username,
+                    Password = proxySettings.Password
+                }
+            };
+            handler.Proxy = proxy;
+            handler.UseProxy = true;
         }
 
-        //Define the standard request objects
-        http.Method = "POST";
+        using var http = new HttpClient(handler, disposeHandler: false)
+        {
+            Timeout = TimeSpan.FromMilliseconds(timeoutMs)
+        };
+        using var request = new HttpRequestMessage(HttpMethod.Post, uri);
 
-        http.AllowAutoRedirect = true;
-
-        http.KeepAlive = true;
-
-        http.PreAuthenticate = false; //Means there will be two requests sent if Authentication required.
-        http.SendChunked = false;
-
-        http.UserAgent = "MY SENDING AGENT";
+        request.Headers.UserAgent.ParseAdd("MY-SENDING-AGENT");
 
         //These Headers are common to all transactions
-        http.Headers.Add("Mime-Version", "1.0");
-        http.Headers.Add("AS2-Version", "1.2");
-
-        http.Headers.Add("AS2-From", from);
-        http.Headers.Add("AS2-To", to);
-        http.Headers.Add("Subject", filename + " transmission.");
-        http.Headers.Add("Message-Id", "<AS2_" + DateTime.Now.ToString("hhmmssddd") + ">");
-        http.Timeout = timeoutMs;
+        request.Headers.TryAddWithoutValidation("Mime-Version", "1.0");
+        request.Headers.TryAddWithoutValidation("AS2-Version", "1.2");
+        request.Headers.TryAddWithoutValidation("AS2-From", from);
+        request.Headers.TryAddWithoutValidation("AS2-To", to);
+        request.Headers.TryAddWithoutValidation("Subject", filename + " transmission.");
+        request.Headers.TryAddWithoutValidation("Message-Id", "<AS2_" + DateTime.Now.ToString("hhmmssddd") + ">");
 
         string contentType = (Path.GetExtension(filename) == ".xml") ? "application/xml" : "application/EDIFACT";
 
         bool encrypt = !string.IsNullOrEmpty(recipientCertFilename);
         bool sign = !string.IsNullOrEmpty(signingCertFilename);
 
+        var contentHeaders = new List<KeyValuePair<string, string>>();
         if (!sign && !encrypt)
         {
-            http.Headers.Add("Content-Transfer-Encoding", "binary");
-            http.Headers.Add("Content-Disposition", "inline; filename=\"" + filename + "\"");
+            request.Headers.TryAddWithoutValidation("Content-Transfer-Encoding", "binary");
+            contentHeaders.Add(new("Content-Disposition", "inline; filename=\"" + filename + "\""));
         }
         if (sign)
         {
@@ -78,43 +73,29 @@ public class AS2Send
 
             content = AS2Utilities.Sign(content, signingCertFilename, signingCertPassword, out contentType);
 
-            http.Headers.Add("EDIINT-Features", "multiple-attachments");
+            request.Headers.TryAddWithoutValidation("EDIINT-Features", "multiple-attachments");
         }
         if (encrypt)
         {
-            if (string.IsNullOrEmpty(recipientCertFilename))
-            {
-                throw new ArgumentNullException(recipientCertFilename, "if encrytionAlgorithm is specified then recipientCertFilename must be specified");
-            }
-
-            byte[] signedContentTypeHeader = System.Text.ASCIIEncoding.ASCII.GetBytes("Content-Type: " + contentType + Environment.NewLine);
+            byte[] signedContentTypeHeader = System.Text.Encoding.ASCII.GetBytes("Content-Type: " + contentType + Environment.NewLine);
             byte[] contentWithContentTypeHeaderAdded = AS2Utilities.ConcatBytes(signedContentTypeHeader, content);
 
             content = AS2Encryption.Encrypt(contentWithContentTypeHeaderAdded, recipientCertFilename, EncryptionAlgorithm.DES3);
             contentType = "application/pkcs7-mime; smime-type=enveloped-data; name=\"smime.p7m\"";
         }
 
-        http.ContentType = contentType;
-        http.ContentLength = content.Length;
+        var body = new ByteArrayContent(content);
+        body.Headers.Remove("Content-Type");
+        body.Headers.TryAddWithoutValidation("Content-Type", contentType);
+        foreach (var header in contentHeaders)
+        {
+            body.Headers.TryAddWithoutValidation(header.Key, header.Value);
+        }
+        request.Content = body;
 
-        SendWebRequest(http, content);
-
-        return HandleWebResponse(http);
-    }
-
-    private static HttpStatusCode HandleWebResponse(HttpWebRequest http)
-    {
-        HttpWebResponse response = (HttpWebResponse)http.GetResponse();
-
-        response.Close();
+        // Synchronous send keeps the public signature; non-success status codes throw, as before.
+        using var response = http.Send(request);
+        response.EnsureSuccessStatusCode();
         return response.StatusCode;
-    }
-
-    private static void SendWebRequest(HttpWebRequest http, byte[] fileData)
-    {
-        Stream oRequestStream = http.GetRequestStream();
-        oRequestStream.Write(fileData, 0, fileData.Length);
-        oRequestStream.Flush();
-        oRequestStream.Close();
     }
 }
