@@ -1,75 +1,63 @@
 # Build and test on every push/PR to trunk.
-# Publishing to nuget.org only happens for version tags (v*), after build and test succeed.
+# Pushes to trunk publish to the private vault-packages feed. nuget.org is promoted from that
+# feed by the n2-publishing repository; this workflow never pushes to nuget.org.
 
 name: .NET Build and test
 
 on:
   push:
     branches: [ "trunk" ]
-    tags: [ "v*" ]
   pull_request:
     branches: [ "trunk" ]
 
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref_type != 'tag' }}
-
 jobs:
   build:
+
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
-
-    - name: Setup .NET 10 and 11
-      uses: actions/setup-dotnet@v4
+    - uses: actions/checkout@v5
+    - name: Setup .NET 10.0 and 11.0
+      uses: actions/setup-dotnet@v5
       with:
         dotnet-version: |
           10.0.x
           11.0.x
-
+    # The vault-packages feed (see src/nuget.config) needs a credential. NUGET_PAT is a Packaging
+    # (read & write) PAT stored as a repository secret. It is added to the runner's copy of
+    # src/nuget.config only; it is never committed or echoed.
+    - name: Authenticate to vault-packages
+      env:
+        NUGET_PAT: ${{ secrets.NUGET_PAT }}
+      run: |
+        if [ -z "$NUGET_PAT" ]; then
+          echo "::error::Repository secret NUGET_PAT is not set; cannot use vault-packages."
+          exit 1
+        fi
+        dotnet nuget update source vault-packages --username az --password "$NUGET_PAT" --store-password-in-clear-text --configfile src/nuget.config
     - name: Restore dependencies
       run: dotnet restore src
-
+    # GeneratePackageOnBuild=True makes the Release build produce the .nupkg as well.
     - name: Build
-      run: dotnet build src --no-restore -c Release
-
+      run: dotnet build src --no-restore --configuration Release
     - name: Test
-      run: dotnet test src --no-build -c Release --verbosity normal
-
-    - name: Pack
-      if: github.ref_type == 'tag'
-      run: dotnet pack src/N2.DataStreams/N2.DataStreams.csproj --no-build -c Release -o artifacts
-
-    - name: Upload package
-      if: github.ref_type == 'tag'
-      uses: actions/upload-artifact@v4
-      with:
-        name: nuget-package
-        path: artifacts/*.nupkg
-        if-no-files-found: error
-
-  publish:
-    # Only for version tags, and only when build and tests passed.
-    needs: build
-    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
-    runs-on: ubuntu-latest
-
-    steps:
-    - uses: actions/download-artifact@v4
-      with:
-        name: nuget-package
-        path: artifacts
-
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: 10.0.x
-
-    - name: Publish to nuget.org
-      env:
-        NUGET_API_KEY: ${{ secrets.PACKAGE_N2 }}
-      run: dotnet nuget push "artifacts/*.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+      run: dotnet test src --no-build --configuration Release --verbosity normal
+    # Publish to vault-packages on pushes to trunk only (not on pull requests). An existing version
+    # is skipped, so only a version bump publishes a new package.
+    - name: Publish to vault-packages
+      if: github.event_name == 'push' && github.ref == 'refs/heads/trunk'
+      working-directory: src
+      run: |
+        set -euo pipefail
+        shopt -s nullglob
+        packages=(N2.DataStreams/bin/Release/*.nupkg)
+        if [ ${#packages[@]} -eq 0 ]; then
+          echo "::error::No *.nupkg found in N2.DataStreams/bin/Release; nothing to publish."
+          exit 1
+        fi
+        for pkg in "${packages[@]}"; do
+          dotnet nuget push "$pkg" --source vault-packages --api-key az --skip-duplicate
+        done

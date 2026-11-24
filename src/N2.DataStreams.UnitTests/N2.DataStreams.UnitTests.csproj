@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
@@ -15,8 +15,8 @@
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers</IncludeAssets>
     </PackageReference>
-    <PackageReference Include="System.IO.Abstractions" Version="23.0.1" />
-    <PackageReference Include="System.IO.Abstractions.TestingHelpers" Version="23.0.1" />
+    <PackageReference Include="System.IO.Abstractions" Version="23.1.0" />
+    <PackageReference Include="System.IO.Abstractions.TestingHelpers" Version="23.1.0" />
   </ItemGroup>
 
   <ItemGroup>

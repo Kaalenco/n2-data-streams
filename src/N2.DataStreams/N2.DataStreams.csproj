@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
@@ -15,7 +15,12 @@
     <Authors>gjkaal</Authors>
     <Description>Library for data streams</Description>
     <IncludeSymbols>False</IncludeSymbols>
-    <Version>2.0.0</Version>
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+    <Version>3.0.1</Version>
+    <PackageVersion>3.0.1</PackageVersion>
+    <AssemblyVersion>3.0.0.0</AssemblyVersion>
+    <FileVersion>3.0.1.0</FileVersion>
+    <ProductVersion>3.0.1</ProductVersion>
     <PackageLicenseExpression>AFL-3.0</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/kaalenco/n2-data-streams</PackageProjectUrl>
     <PackageId>N2.DataStreams</PackageId>
@@ -42,8 +47,15 @@
   </ItemGroup>
   
   <ItemGroup>
+    <PackageReference Include="System.IO.Abstractions" Version="23.1.0" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net10.0'">
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.15" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net11.0'">
     <PackageReference Include="System.Security.Cryptography.Pkcs" Version="11.0.0" />
-    <PackageReference Include="System.IO.Abstractions" Version="23.0.1" />
   </ItemGroup>
 
 </Project>
